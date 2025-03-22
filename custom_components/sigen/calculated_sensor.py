@@ -413,10 +413,41 @@ class SigenergyIntegrationSensor(CoordinatorEntity, RestoreSensor):
         self._device_info_override = device_info
         self._source_entity_id = source_entity_id
         self._round_digits = round_digits
-        
         # Initialize state variables
         self._state: Decimal | None = None
         self._last_valid_state: Decimal | None = None
+        
+        # Check for migrated states
+        if hasattr(coordinator, 'hub') and hasattr(coordinator.hub, 'config_entry'):
+            _LOGGER.debug("[CS][Migration] Checking for migrated states for %s (%s)",
+                         name, self.entity_description.key)
+            migrated_states = coordinator.hub.config_entry.data.get("migrated_states", {})
+            
+            if self.entity_description.key in migrated_states:
+                try:
+                    migrated_value = migrated_states[self.entity_description.key]
+                    self._state = Decimal(migrated_value)
+                    self._last_valid_state = self._state
+                    _LOGGER.info("[CS][Migration] Successfully restored state for %s: %s",
+                                name, self._state)
+                except (ValueError, TypeError, InvalidOperation) as e:
+                    _LOGGER.warning("[CS][Migration] Could not restore migrated state for %s: %s",
+                                  name, e)
+            else:
+                _LOGGER.debug("[CS][Migration] No migrated state found for %s (%s)",
+                            name, self.entity_description.key)
+
+
+        # Restore migrated state if available
+        if hasattr(coordinator, 'hub') and hasattr(coordinator.hub, 'config_entry'):
+            migrated_states = coordinator.hub.config_entry.data.get("migrated_states", {})
+            if self.entity_description.key in migrated_states:
+                try:
+                    self._state = Decimal(migrated_states[self.entity_description.key])
+                    self._last_valid_state = self._state
+                    _LOGGER.debug(f"[CS][Migration] Restored migrated state for {name}: {self._state}")
+                except (ValueError, TypeError, InvalidOperation) as e:
+                    _LOGGER.warning(f"[CS][Migration] Could not restore migrated state for {name}: {e}")
         
         # Time tracking variables
         self._max_sub_interval = (

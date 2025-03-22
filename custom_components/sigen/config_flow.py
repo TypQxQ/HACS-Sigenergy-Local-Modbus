@@ -2,12 +2,19 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Tuple
 
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PORT
+from homeassistant.const import (
+    CONF_HOST,
+    CONF_NAME,
+    CONF_PORT,
+    STATE_UNKNOWN,
+    STATE_UNAVAILABLE,
+)
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
@@ -56,13 +63,13 @@ STEP_DEVICE_TYPE_SCHEMA = vol.Schema(
         ),
     }
 )
-
 STEP_PLANT_CONFIG_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_HOST): str,
         vol.Required(CONF_PORT, default=DEFAULT_PORT): int,
         vol.Required(CONF_INVERTER_SLAVE_ID, default=DEFAULT_INVERTER_SLAVE_ID): int,
         vol.Required(CONF_READ_ONLY, default=DEFAULT_READ_ONLY): bool,
+        vol.Optional("migrate_from_old_integration", default=False): bool,
     }
 )
 
@@ -168,9 +175,7 @@ class SigenergyConfigFlow(config_entries.ConfigFlow):
         # Should never reach here
         return self.async_abort(reason="unknown_device_type")
     
-    async def async_step_plant_config(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    async def async_step_plant_config(self, user_input: dict[str, Any] | None = None) -> FlowResult:
         """Handle the plant configuration step."""
         errors = {}
         
@@ -180,10 +185,74 @@ class SigenergyConfigFlow(config_entries.ConfigFlow):
                 data_schema=STEP_PLANT_CONFIG_SCHEMA
             )
 
-        # Store plant configuration
+        # Handle migration if requested
+        if user_input.get("migrate_from_old_integration", False):
+            _LOGGER.debug("[Migration] Starting migration from old Modbus integration")
+            try:
+                # Check for Old Integration Entities
+                old_entities = {
+                    "plant_accumulated_grid_export_energy": "sensor.sigendev_accumulated_export_energy",
+                    "plant_accumulated_grid_import_energy": "sensor.sigendev_accumulated_import_energy",
+                    "plant_daily_grid_export_energy": "sensor.sigendev_daily_export_energy",
+                    "plant_daily_grid_import_energy": "sensor.sigendev_daily_import_energy",
+                }
+
+                # Check if entities exist
+                all_entities_exist = True
+                missing_entities = []
+                for new_entity, old_entity in old_entities.items():
+                    state = self.hass.states.get(old_entity)
+                    if not state or state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+                        _LOGGER.warning("[Migration] Old entity %s not found or has invalid state", old_entity)
+                        missing_entities.append(old_entity)
+                        all_entities_exist = False
+
+                if not all_entities_exist:
+                    _LOGGER.info("[Migration] Old Modbus integration entities not found")
+                    _LOGGER.debug("[Migration] Missing entities: %s", missing_entities)
+                    errors["base"] = "old_integration_not_found"
+                    return self.async_show_form(
+                        step_id=STEP_PLANT_CONFIG,
+                        data_schema=STEP_PLANT_CONFIG_SCHEMA,
+                        errors=errors
+                    )
+
+                # Read Old Entity Data
+                old_states = {}
+                for new_entity, old_entity in old_entities.items():
+                    state = self.hass.states.get(old_entity)
+                    try:
+                        old_states[new_entity] = Decimal(state.state)
+                        _LOGGER.debug("[Migration] Read state from %s: %s", old_entity, state.state)
+                    except (ValueError, TypeError, InvalidOperation) as e:
+                        _LOGGER.warning("[Migration] Invalid state for %s: %s (%s)", old_entity, state.state, e)
+                        errors["base"] = "migration_failed"
+                        return self.async_show_form(
+                            step_id=STEP_PLANT_CONFIG,
+                            data_schema=STEP_PLANT_CONFIG_SCHEMA,
+                            errors=errors
+                        )
+
+                # Store migrated values
+                self._data["migrated_states"] = {k: str(v) for k, v in old_states.items()}
+                _LOGGER.info("[Migration] Successfully migrated %d entities:", len(old_states))
+                for new_entity, value in old_states.items():
+                    _LOGGER.info("[Migration] - %s: %s", new_entity, value)
+                
+                _LOGGER.debug("[Migration] Full migration data: %s", self._data["migrated_states"])
+                self._data["migration_result"] = "success"
+                
+            except Exception as e:
+                _LOGGER.error("[Migration] Failed: %s", str(e))
+                errors["base"] = "migration_failed"
+                return self.async_show_form(
+                    step_id=STEP_PLANT_CONFIG,
+                    data_schema=STEP_PLANT_CONFIG_SCHEMA,
+                    errors=errors
+                )
+
+        # Store plant configuration and set default plant ID
         self._data.update(user_input)
-        
-        # Always use the default plant ID (247)
         self._data[CONF_PLANT_ID] = DEFAULT_PLANT_SLAVE_ID
 
         # Process and validate inverter ID

@@ -21,7 +21,8 @@
           "inverter_slave_ids": "Inverter Device ID (Default is 1)",
           "ac_charger_slave_ids": "AC Charger Device IDs (comma-separated when multiple. Default is empty for no AC charger)",
           "dc_charger_slave_ids": "Inverter IDs with DC Chargers attached (comma-separated when multiple)",
-          "read_only": "Read-Only Mode (prevents any writes to the Sigenergy system)"
+          "read_only": "Read-Only Mode (prevents any writes to the Sigenergy system)",
+          "migrate_from_old_integration": "Migrate data from old Modbus integration (if available)"
         }
       },
       "select_plant": {
@@ -80,7 +81,9 @@
       "ac_charger_conflicts_inverter": "AC charger IDs must be different from inverter IDs.",
       "no_plants_available": "No plants are available. Please add a plant first.",
       "no_inverters_available": "No inverters are available on the selected plant. Please add an inverter first.",
-      "read_only_mode_error": "Cannot write to the Sigenergy system while in read-only mode."
+      "read_only_mode_error": "Cannot write to the Sigenergy system while in read-only mode.",
+      "old_integration_not_found": "Old Modbus integration entities not found. Make sure the old integration is running.",
+      "migration_failed": "Migration from old integration failed. Please check the logs for more details."
     },
     "abort": {
       "already_configured": "This Sigenergy system is already configured.",
