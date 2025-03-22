@@ -417,37 +417,49 @@ class SigenergyIntegrationSensor(CoordinatorEntity, RestoreSensor):
         self._state: Decimal | None = None
         self._last_valid_state: Decimal | None = None
         
-        # Check for migrated states
-        if hasattr(coordinator, 'hub') and hasattr(coordinator.hub, 'config_entry'):
-            _LOGGER.debug("[CS][Migration] Checking for migrated states for %s (%s)",
-                         name, self.entity_description.key)
-            migrated_states = coordinator.hub.config_entry.data.get("migrated_states", {})
-            
-            if self.entity_description.key in migrated_states:
-                try:
-                    migrated_value = migrated_states[self.entity_description.key]
-                    self._state = Decimal(migrated_value)
-                    self._last_valid_state = self._state
-                    _LOGGER.info("[CS][Migration] Successfully restored state for %s: %s",
-                                name, self._state)
-                except (ValueError, TypeError, InvalidOperation) as e:
-                    _LOGGER.warning("[CS][Migration] Could not restore migrated state for %s: %s",
-                                  name, e)
-            else:
-                _LOGGER.debug("[CS][Migration] No migrated state found for %s (%s)",
+        # Only handle migration during first setup (when both are None)
+        if self._state is None and self._last_valid_state is None:
+            # Check for migrated states
+            if hasattr(coordinator, 'hub') and hasattr(coordinator.hub, 'config_entry'):
+                _LOGGER.debug("[CS][Migration] Checking for migrated states for %s (%s)",
                             name, self.entity_description.key)
-
-
-        # Restore migrated state if available
-        if hasattr(coordinator, 'hub') and hasattr(coordinator.hub, 'config_entry'):
-            migrated_states = coordinator.hub.config_entry.data.get("migrated_states", {})
-            if self.entity_description.key in migrated_states:
-                try:
-                    self._state = Decimal(migrated_states[self.entity_description.key])
-                    self._last_valid_state = self._state
-                    _LOGGER.debug(f"[CS][Migration] Restored migrated state for {name}: {self._state}")
-                except (ValueError, TypeError, InvalidOperation) as e:
-                    _LOGGER.warning(f"[CS][Migration] Could not restore migrated state for {name}: {e}")
+                migrated_states = coordinator.hub.config_entry.data.get("migrated_states", {})
+                
+                if self.entity_description.key in migrated_states:
+                    try:
+                        migrated_value = migrated_states[self.entity_description.key]
+                        self._state = Decimal(migrated_value)
+                        self._last_valid_state = self._state
+                        _LOGGER.info("[CS][Migration] Successfully restored state for %s: %s",
+                                   name, self._state)
+                        
+                        # Remove the migrated state from config entry to prevent future overwrites
+                        try:
+                            if "migrated_states" in coordinator.hub.config_entry.data:
+                                config_data = dict(coordinator.hub.config_entry.data)
+                                migrated_states = dict(config_data.get("migrated_states", {}))
+                                migrated_states.pop(self.entity_description.key, None)
+                                
+                                if migrated_states:
+                                    config_data["migrated_states"] = migrated_states
+                                else:
+                                    config_data.pop("migrated_states", None)
+                                
+                                self.hass.config_entries.async_update_entry(
+                                    coordinator.hub.config_entry,
+                                    data=config_data
+                                )
+                                _LOGGER.debug("[CS][Migration] Removed migrated state from config entry for %s",
+                                            name)
+                        except Exception as update_error:
+                            _LOGGER.warning("[CS][Migration] Failed to update config entry for %s: %s",
+                                          name, update_error)
+                    except (ValueError, TypeError, InvalidOperation) as e:
+                        _LOGGER.warning("[CS][Migration] Could not restore migrated state for %s: %s",
+                                      name, str(e))
+                else:
+                    _LOGGER.debug("[CS][Migration] No migrated state found for %s (%s)",
+                                name, self.entity_description.key)
         
         # Time tracking variables
         self._max_sub_interval = (
