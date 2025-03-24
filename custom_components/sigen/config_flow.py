@@ -323,8 +323,9 @@ class SigenergyConfigFlow(config_entries.ConfigFlow):
         
         # Should never reach here
         return self.async_abort(reason="unknown_device_type")
+    
     async def async_step_inverter_config(self, user_input: dict[str, Any] | None = None) -> FlowResult:
-        """Handle inverter configurations"""
+        """Handle inverter configurations when adding"""
         errors = {}
         
         # Get the inverter details
@@ -336,6 +337,7 @@ class SigenergyConfigFlow(config_entries.ConfigFlow):
         # Check if this is the first (implicit) inverter
         is_first_inverter = False
         inverter_keys = list(inverter_connections.keys())
+        _LOGGER.debug("Inverter keys: %s, name: %s", inverter_keys, inverter_name)
         if inverter_keys and inverter_name == inverter_keys[0]:
             is_first_inverter = True
             _LOGGER.debug("This is the first (implicit) inverter")
@@ -343,9 +345,10 @@ class SigenergyConfigFlow(config_entries.ConfigFlow):
         if user_input is None:
             # Create schema with current values
             if is_first_inverter:
-                # For first inverter, only allow configuring slave ID - no host, port or remove option
+                # For first inverter, hide host/port fields
                 schema = vol.Schema({
                     vol.Required(CONF_SLAVE_ID, default=inverter_details.get(CONF_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID)): int,
+                    vol.Optional(CONF_REMOVE_DEVICE, default=False): bool,
                 })
             else:
                 # For other inverters, allow full configuration
@@ -867,7 +870,7 @@ class SigenergyOptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_create_entry(title="", data={})
     
     async def async_step_inverter_config(self, user_input: dict[str, Any] | None = None):
-        """Handle inverter configurations"""
+        """Handle inverter configurations when reconfiguring"""
         errors = {}
         
         # Get the inverter details
