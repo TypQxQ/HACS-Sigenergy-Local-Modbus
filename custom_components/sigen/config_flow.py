@@ -323,74 +323,201 @@ class SigenergyConfigFlow(config_entries.ConfigFlow):
         
         # Should never reach here
         return self.async_abort(reason="unknown_device_type")
-    async def async_step_inverter_config(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Handle the inverter configuration step."""
+    async def async_step_inverter_config(self, user_input: dict[str, Any] | None = None) -> FlowResult:
+        """Handle inverter configurations"""
         errors = {}
         
+        # Get the inverter details
+        inverter_name = self._selected_device["id"] if self._selected_device else None
+        inverter_connections = self._data.get(CONF_INVERTER_CONNECTIONS, {})
+        _LOGGER.debug("Inverter name: %s, connections: %s", inverter_name, inverter_connections)
+        inverter_details = inverter_connections.get(inverter_name, {})
+        
+        # Check if this is the first (implicit) inverter
+        is_first_inverter = False
+        inverter_keys = list(inverter_connections.keys())
+        if inverter_keys and inverter_name == inverter_keys[0]:
+            is_first_inverter = True
+            _LOGGER.debug("This is the first (implicit) inverter")
+        
         if user_input is None:
-            # For first inverter, use plant's host and port
-            if self._data.get(CONF_HOST) and self._data.get(CONF_PORT):
+            # Create schema with current values
+            if is_first_inverter:
+                # For first inverter, only allow configuring slave ID - no host, port or remove option
                 schema = vol.Schema({
-                    vol.Required(CONF_HOST, default=self._data[CONF_HOST]): str,
-                    vol.Required(CONF_PORT, default=self._data[CONF_PORT]): int,
-                    vol.Required(CONF_SLAVE_ID, default=DEFAULT_INVERTER_SLAVE_ID): int,
+                    vol.Required(CONF_SLAVE_ID, default=inverter_details.get(CONF_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID)): int,
                 })
             else:
-                schema = STEP_INVERTER_CONFIG_SCHEMA
+                # For other inverters, allow full configuration
+                schema = vol.Schema({
+                    vol.Required(CONF_HOST, default=inverter_details.get(CONF_HOST, "")): str,
+                    vol.Required(CONF_PORT, default=inverter_details.get(CONF_PORT, DEFAULT_PORT)): int,
+                    vol.Required(CONF_SLAVE_ID, default=inverter_details.get(CONF_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID)): int,
+                    vol.Optional(CONF_REMOVE_DEVICE, default=False): bool,
+                })
+            
             return self.async_show_form(
                 step_id=STEP_INVERTER_CONFIG,
                 data_schema=schema,
             )
         
-        # Validate the slave ID
-        slave_id = user_input.get(CONF_SLAVE_ID)
-        if slave_id is None or not (1 <= slave_id <= 246):
-            errors[CONF_SLAVE_ID] = "each_id_must_be_between_1_and_246"
-            return self.async_show_form(
-                step_id=STEP_INVERTER_CONFIG,
-                data_schema=STEP_INVERTER_CONFIG_SCHEMA,
-                errors=errors,
-            )
+        # For non-first inverters, check if user wants to remove the device
+        if not is_first_inverter and user_input.get(CONF_REMOVE_DEVICE, False):
+            # Validate that the inverter can be removed
+            dc_chargers = self._data.get(CONF_DC_CHARGER_SLAVE_ID, [])
+            inverter_slave_id = inverter_details.get(CONF_SLAVE_ID)
             
-        # Check for duplicate IDs
-        plant_entry = self.hass.config_entries.async_get_entry(self._selected_plant_entry_id)
-        if plant_entry:
-            plant_inverters = plant_entry.data.get(CONF_INVERTER_SLAVE_ID, [])
-            if slave_id in plant_inverters and not _LOGGER.isEnabledFor(logging.DEBUG):
-                errors[CONF_SLAVE_ID] = "duplicate_ids_found"
+            if inverter_slave_id in dc_chargers:
+                errors[CONF_REMOVE_DEVICE] = "cannot_remove_parent"
+                
+                # Re-create schema with error
+                schema = vol.Schema({
+                    vol.Required(CONF_HOST, default=user_input.get(CONF_HOST, "")): str,
+                    vol.Required(CONF_PORT, default=user_input.get(CONF_PORT, DEFAULT_PORT)): int,
+                    vol.Required(CONF_SLAVE_ID, default=user_input.get(CONF_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID)): int,
+                    vol.Optional(CONF_REMOVE_DEVICE, default=True): bool,
+                })
+                
                 return self.async_show_form(
                     step_id=STEP_INVERTER_CONFIG,
-                    data_schema=STEP_INVERTER_CONFIG_SCHEMA,
+                    data_schema=schema,
                     errors=errors,
                 )
             
-            # Get the inverter name based on number of existing inverters
-            inverter_no = len(plant_inverters)
-            inverter_name = f"Inverter{' ' if inverter_no == 0 else f' {inverter_no + 1} '}"
+            # Remove the inverter
+            new_data = dict(self._data)
             
-            # Create or update the inverter connections dictionary
-            new_data = dict(plant_entry.data)
-            inverter_connections = new_data.get(CONF_INVERTER_CONNECTIONS, {})
-            inverter_connections[inverter_name] = {
-                CONF_HOST: user_input[CONF_HOST],
-                CONF_PORT: user_input[CONF_PORT],
-                CONF_SLAVE_ID: slave_id
-            }
+            # Remove from inverter connections
+            new_inverter_connections = dict(inverter_connections)
+            if inverter_name in new_inverter_connections:
+                del new_inverter_connections[inverter_name]
+            new_data[CONF_INVERTER_CONNECTIONS] = new_inverter_connections
             
-            # Update the plant's configuration with the new inverter
-            new_data[CONF_INVERTER_SLAVE_ID] = plant_inverters + [slave_id]
-            new_data[CONF_INVERTER_CONNECTIONS] = inverter_connections
+            # Remove from inverter slave IDs
+            inverter_slave_ids = new_data.get(CONF_INVERTER_SLAVE_ID, [])
+            if inverter_slave_id in inverter_slave_ids:
+                inverter_slave_ids.remove(inverter_slave_id)
+            new_data[CONF_INVERTER_SLAVE_ID] = inverter_slave_ids
             
+            # Update the configuration entry
             self.hass.config_entries.async_update_entry(
-                plant_entry,
-                data=new_data
+                self.config_entry, data=new_data
             )
             
-            return self.async_abort(reason="device_added")
+            return self.async_create_entry(title="", data={})
+        
+        # For the first inverter, only validate the slave ID
+        if is_first_inverter:
+            # Validate slave ID
+            slave_id = user_input.get(CONF_SLAVE_ID)
+            existing_ids = []
             
-        return self.async_abort(reason="parent_plant_not_found")
+            # Get existing slave IDs excluding the current one
+            for name, details in inverter_connections.items():
+                if name != inverter_name:
+                    existing_ids.append(details.get(CONF_SLAVE_ID))
+            
+            slave_id_errors = validate_slave_id(slave_id or 0, existing_ids)
+            errors.update(slave_id_errors or {})
+            
+            if errors:
+                # Re-create schema with user input values for error display
+                schema = vol.Schema({
+                    vol.Required(CONF_SLAVE_ID, default=user_input.get(CONF_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID)): int,
+                })
+                
+                return self.async_show_form(
+                    step_id=STEP_INVERTER_CONFIG,
+                    data_schema=schema,
+                    errors=errors,
+                )
+            
+            # Update only the slave ID for the first inverter
+            new_data = dict(self._data)
+            new_inverter_connections = dict(inverter_connections)
+            
+            # Keep the existing host and port, only update slave ID
+            new_inverter_details = dict(inverter_details)
+            new_inverter_details[CONF_SLAVE_ID] = slave_id
+            new_inverter_connections[inverter_name] = new_inverter_details
+            
+            # Update the configuration entry
+            new_data[CONF_INVERTER_CONNECTIONS] = new_inverter_connections
+            
+            # Update the inverter slave IDs if changed
+            old_slave_id = inverter_details.get(CONF_SLAVE_ID)
+            if old_slave_id != slave_id:
+                inverter_slave_ids = new_data.get(CONF_INVERTER_SLAVE_ID, [])
+                if old_slave_id in inverter_slave_ids:
+                    inverter_slave_ids.remove(old_slave_id)
+                inverter_slave_ids.append(slave_id)
+                new_data[CONF_INVERTER_SLAVE_ID] = inverter_slave_ids
+            
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, data=new_data
+            )
+            
+            return self.async_create_entry(title="", data={})
+        
+        # For non-first inverters, validate host, port, and slave ID
+        host_port_errors = validate_host_port(user_input.get(CONF_HOST, ""), user_input.get(CONF_PORT, 0))
+        errors.update(host_port_errors)
+        
+        # Validate slave ID
+        slave_id = user_input.get(CONF_SLAVE_ID)
+        existing_ids = []
+        
+        # Get existing slave IDs excluding the current one
+        for name, details in inverter_connections.items():
+            if name != inverter_name:
+                existing_ids.append(details.get(CONF_SLAVE_ID))
+        
+        slave_id_errors = validate_slave_id(slave_id or 0, existing_ids)
+        errors.update(slave_id_errors or {})
+        
+        if errors:
+            # Re-create schema with user input values for error display
+            schema = vol.Schema({
+                vol.Required(CONF_HOST, default=user_input.get(CONF_HOST, "")): str,
+                vol.Required(CONF_PORT, default=user_input.get(CONF_PORT, DEFAULT_PORT)): int,
+                vol.Required(CONF_SLAVE_ID, default=user_input.get(CONF_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID)): int,
+                vol.Optional(CONF_REMOVE_DEVICE, default=user_input.get(CONF_REMOVE_DEVICE, False)): bool,
+            })
+            
+            return self.async_show_form(
+                step_id=STEP_INVERTER_CONFIG,
+                data_schema=schema,
+                errors=errors,
+            )
+        
+        # Update the inverter configuration
+        new_data = dict(self._data)
+        new_inverter_connections = dict(inverter_connections)
+        
+        # Update the inverter details
+        new_inverter_connections[inverter_name] = {
+            CONF_HOST: user_input[CONF_HOST],
+            CONF_PORT: user_input[CONF_PORT],
+            CONF_SLAVE_ID: slave_id
+        }
+        
+        # Update the configuration entry
+        new_data[CONF_INVERTER_CONNECTIONS] = new_inverter_connections
+        
+        # Update the inverter slave IDs if changed
+        old_slave_id = inverter_details.get(CONF_SLAVE_ID)
+        if old_slave_id != slave_id:
+            inverter_slave_ids = new_data.get(CONF_INVERTER_SLAVE_ID, [])
+            if old_slave_id in inverter_slave_ids:
+                inverter_slave_ids.remove(old_slave_id)
+            inverter_slave_ids.append(slave_id)
+            new_data[CONF_INVERTER_SLAVE_ID] = inverter_slave_ids
+        
+        self.hass.config_entries.async_update_entry(
+            self.config_entry, data=new_data
+        )
+        
+        return self.async_create_entry(title="", data={})
     
     async def async_step_ac_charger_config(
         self, user_input: dict[str, Any] | None = None
@@ -594,9 +721,9 @@ class SigenergyOptionsFlowHandler(config_entries.OptionsFlow):
             for i, (inv_name, inv_details) in enumerate(inverter_connections.items()):
                 device_key = f"inverter_{inv_name}"
                 
-                # For first inverter (implicit), remove the number and include host/ID info
+                # For first inverter (implicit), remove the number and include only ID info
                 if i == 0:
-                    display_name = f"Inverter (Host: {inv_details.get(CONF_HOST)}, ID: {inv_details.get(CONF_SLAVE_ID)})"
+                    display_name = f"Inverter (ID: {inv_details.get(CONF_SLAVE_ID)})"
                 else:
                     display_name = f"{inv_name} (Host: {inv_details.get(CONF_HOST)}, ID: {inv_details.get(CONF_SLAVE_ID)})"
                 
