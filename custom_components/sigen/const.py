@@ -33,6 +33,7 @@ CONF_AC_CHARGER_CONNECTIONS = "ac_charger_connections"
 CONF_DC_CHARGER_CONNECTIONS = "dc_charger_connections"
 CONF_DEVICE_TYPE = "device_type"
 CONF_PARENT_DEVICE_ID = "parent_device_id"
+CONF_INVERTER_HAS_DCCHARGER = "inverter_has_dccharger"
 
 # Default names
 DEFAULT_INVERTER_NAME = "Sigen Inverter"
@@ -63,6 +64,7 @@ DEFAULT_INVERTER_SLAVE_ID = 1  # Default Inverter address
 DEFAULT_SCAN_INTERVAL = 5
 DEFAULT_INVERTER_COUNT = 1
 DEFAULT_READ_ONLY = True  # Default to read-only mode
+DEFAULT_INVERTER_HAS_DCCHARGER = False
 
 # Platforms
 PLATFORMS = ["sensor", "switch", "select", "number"]

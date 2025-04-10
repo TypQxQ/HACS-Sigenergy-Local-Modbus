@@ -47,6 +47,8 @@ from .const import (
     STEP_SELECT_PLANT,
     STEP_SELECT_INVERTER,
     DEFAULT_READ_ONLY,
+    CONF_INVERTER_HAS_DCCHARGER,
+    DEFAULT_INVERTER_HAS_DCCHARGER
 )
 
 # Define constants that might not be in the .const module
