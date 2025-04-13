@@ -83,19 +83,26 @@ async def async_setup_entry(
         )
     )
 
-    # Calculated Integration Sensors:
-    async_add_entities(
-        generate_sigen_entity(
-            plant_name,
-            None,
-            None,
-            coordinator,
-            SigenergyIntegrationSensor,
-            SCS.PLANT_INTEGRATION_SENSORS,
-            DEVICE_TYPE_PLANT,
-            hass,
-        )
+    # Calculated Integration Sensors (Plant):
+    plant_integration_sensors = generate_sigen_entity(
+        plant_name,
+        None,
+        None,
+        coordinator,
+        SigenergyIntegrationSensor,
+        SCS.PLANT_INTEGRATION_SENSORS,
+        DEVICE_TYPE_PLANT,
+        hass,
     )
+    if plant_integration_sensors:
+        async_add_entities(plant_integration_sensors)
+        _LOGGER.debug("Registering %d plant integration sensors with coordinator.", len(plant_integration_sensors))
+        _LOGGER.debug("The added sensors are: %s", str([s.name for s in plant_integration_sensors]))
+        for sensor in plant_integration_sensors:
+            if isinstance(sensor, SigenergyIntegrationSensor): # Ensure correct type before appending
+                coordinator.integration_sensors.append(sensor)
+            else:
+                 _LOGGER.warning("generate_sigen_entity returned non-SigenergyIntegrationSensor for plant: %s", type(sensor))
 
     # Add inverter sensors
     for device_name, device_conn in coordinator.hub.inverter_connections.items():
@@ -124,19 +131,26 @@ async def async_setup_entry(
             )
         )
 
-        # Calculated Integration Sensors:
-        async_add_entities(
-            generate_sigen_entity(
-                plant_name,
-                device_name,
-                device_conn,
-                coordinator,
-                SigenergyIntegrationSensor,
-                SCS.INVERTER_INTEGRATION_SENSORS,
-                DEVICE_TYPE_INVERTER,
-                hass,
-            )
+        # Calculated Integration Sensors (Inverter):
+        inverter_integration_sensors = generate_sigen_entity(
+            plant_name,
+            device_name,
+            device_conn,
+            coordinator,
+            SigenergyIntegrationSensor,
+            SCS.INVERTER_INTEGRATION_SENSORS,
+            DEVICE_TYPE_INVERTER,
+            hass,
         )
+        if inverter_integration_sensors:
+            async_add_entities(inverter_integration_sensors)
+            _LOGGER.debug("Registering %d inverter integration sensors for '%s' with coordinator.", len(inverter_integration_sensors), device_name)
+            _LOGGER.debug("The added sensors are: %s", str([s.name for s in inverter_integration_sensors]))
+            for sensor in inverter_integration_sensors:
+                 if isinstance(sensor, SigenergyIntegrationSensor): # Ensure correct type
+                     coordinator.integration_sensors.append(sensor)
+                 else:
+                     _LOGGER.warning("generate_sigen_entity returned non-SigenergyIntegrationSensor for inverter '%s': %s", device_name, type(sensor))
 
         # PV strings
         inverter_data = coordinator.data["inverters"][device_name]

@@ -21,10 +21,10 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
 )
-from homeassistant.core import callback, State
+from homeassistant.core import callback
 from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.helpers.entity import DeviceInfo
-from homeassistant.helpers.event import async_track_state_change_event, async_call_later
+# Removed async_track_state_change_event, async_call_later as they are no longer used
 from homeassistant.util import dt as dt_util
 
 from .const import EMSWorkMode
@@ -346,13 +346,6 @@ class SigenergyCalculations:
         return consumed_power
 
 
-class IntegrationTrigger(Enum):
-    """Trigger type for integration calculations."""
-
-    STATE_EVENT = "state_event"
-    TIME_ELAPSED = "time_elapsed"
-
-
 class SigenergyIntegrationSensor(SigenergyEntity, RestoreSensor):
     """Implementation of an Integration Sensor with identical behavior to HA core."""
 
@@ -403,15 +396,6 @@ class SigenergyIntegrationSensor(SigenergyEntity, RestoreSensor):
             or self._max_sub_interval.total_seconds() == 0
             else self._max_sub_interval
         )
-
-        self._max_sub_interval_exceeded_callback = lambda *args: None
-        self._cancel_max_sub_interval_exceeded_callback = (
-            self._max_sub_interval_exceeded_callback
-        )
-        self._last_integration_time = dt_util.utcnow()
-        self._last_integration_trigger = IntegrationTrigger.STATE_EVENT
-
-        # Device info is now handled by SigenergyEntity's __init__
 
     def _decimal_state(self, state: str) -> Optional[Decimal]:
         """Convert state to Decimal or return None if not possible."""
@@ -476,6 +460,104 @@ class SigenergyIntegrationSensor(SigenergyEntity, RestoreSensor):
             async_track_point_in_time(self.hass, _handle_midnight, midnight)
         )
 
+    async def async_update_integration(
+        self, current_source_value: Decimal | None, update_timestamp: datetime
+    ):
+        """Update the sensor state using the trapezoidal rule based on coordinator updates."""
+        if current_source_value is None:
+            _LOGGER.warning(
+                "[%s] Skipping integration update: current_source_value is None",
+                self.entity_id,
+            )
+            # We might still want to update the timestamp if the source was valid before
+            # self._last_update_timestamp = update_timestamp # Decide if this is needed
+            return
+
+        if self._last_source_value is None or self._last_update_timestamp is None:
+            # First update or after restoration/reset, just store current values
+            _LOGGER.debug(
+                "[%s] First integration update. Storing value: %s at %s",
+                self.entity_id,
+                current_source_value,
+                update_timestamp,
+            )
+            self._last_source_value = current_source_value
+            self._last_update_timestamp = update_timestamp
+            # Don't write state yet, as no integration has occurred
+            return
+
+        # Calculate elapsed time in seconds
+        elapsed_time_delta = update_timestamp - self._last_update_timestamp
+        elapsed_seconds = Decimal(elapsed_time_delta.total_seconds())
+
+        # Avoid negative or zero time difference
+        if elapsed_seconds <= 0:
+             _LOGGER.debug(
+                "[%s] Skipping integration update: Non-positive time delta (%s seconds)",
+                self.entity_id,
+                elapsed_seconds,
+            )
+             # Update timestamp and value even if skipping calculation to prevent stale data issues on next valid update
+             self._last_source_value = current_source_value
+             self._last_update_timestamp = update_timestamp
+             return
+
+
+        # Calculate area using trapezoidal rule (W*s)
+        # Ensure both values are valid Decimals before calculation
+        try:
+            left_val = self._last_source_value
+            right_val = current_source_value
+            area = elapsed_seconds * (left_val + right_val) / Decimal(2)
+        except (TypeError, InvalidOperation) as e:
+            _LOGGER.warning(
+                "[%s] Error during trapezoidal calculation: %s. Left: %s, Right: %s, Time: %s",
+                self.entity_id, e, self._last_source_value, current_source_value, elapsed_seconds
+            )
+            # Update state but don't calculate area
+            self._last_source_value = current_source_value
+            self._last_update_timestamp = update_timestamp
+            return
+
+
+        # Convert area from W*s to kWh (divide by 1000 * 3600)
+        area_kwh = area / Decimal(3600000)
+
+        # Update the total state
+        if self._state is None:
+             # Initialize state if it's the first valid calculation after setup/reset
+             self._state = area_kwh
+        else:
+             try:
+                 self._state += area_kwh
+             except (TypeError, InvalidOperation) as e:
+                 _LOGGER.error(
+                     "[%s] Failed to add area (%s) to current state (%s): %s",
+                     self.entity_id, area_kwh, self._state, e
+                 )
+                 # Attempt to recover by setting state to the new area if possible
+                 try:
+                     self._state = area_kwh
+                 except (TypeError, InvalidOperation):
+                     _LOGGER.error("[%s] Could not even set state to the new area. Resetting state.", self.entity_id)
+                     self._state = None # Or Decimal(0) if preferred
+
+
+        # Store the current values for the next iteration
+        self._last_source_value = current_source_value
+        self._last_update_timestamp = update_timestamp
+        self._last_valid_state = self._state # Keep track of the last known good state
+
+        _LOGGER.debug(
+            "[%s] Updated integration. Area (kWh): %s, New State: %s",
+            self.entity_id,
+            area_kwh,
+            self._state,
+        )
+
+        # Write the new state to Home Assistant
+        self.async_write_ha_state()
+
     async def async_added_to_hass(self) -> None:
         """Handle entity which will be added."""
         await super().async_added_to_hass()
@@ -490,177 +572,39 @@ class SigenergyIntegrationSensor(SigenergyEntity, RestoreSensor):
             try:
                 self._state = Decimal(last_state.state)
                 self._last_valid_state = self._state
-                self._last_integration_time = dt_util.utcnow()
+                # Restore timestamp, leave source value as None until first coordinator update
+                self._last_update_timestamp = last_state.last_updated or dt_util.utcnow()
+                self._last_source_value = None
+                _LOGGER.debug("[%s] Restored state: %s, Last Update Timestamp: %s", self.entity_id, self._state, self._last_update_timestamp)
             except (ValueError, TypeError, InvalidOperation):
-                _LOGGER.warning("Could not restore last state for %s", self.entity_id)
+                _LOGGER.warning("Could not restore last state for %s, initializing to 0", self.entity_id)
+                self._state = Decimal(0)
+                self._last_valid_state = self._state
+                self._last_update_timestamp = dt_util.utcnow()
+                self._last_source_value = None
 
-        # Set up appropriate handlers based on max_sub_interval
-        # Ensure source_entity_id is valid before proceeding
+        # Ensure source_entity_id is valid
         if not isinstance(self._source_entity_id, str):
             _LOGGER.error(
                 "Source entity ID is not a valid string for %s: %s",
                 self.entity_id,
                 self._source_entity_id,
             )
-            return  # Cannot set up tracking without a valid source ID
+            # No return here, allow setup to continue but integration won't work
 
-        if self._max_sub_interval is not None:
-            source_state = self.hass.states.get(self._source_entity_id)
-            self._schedule_max_sub_interval_exceeded_if_state_is_numeric(source_state)
-            self.async_on_remove(self._cancel_max_sub_interval_exceeded_callback)
-            handle_state_change = self._integrate_on_state_change_with_max_sub_interval
-        else:
-            _LOGGER.debug("No max_sub_interval set, using default state change handler for %s", self.name)
-            handle_state_change = self._integrate_on_state_change_callback
-
-        # Check source entity and log potential alternatives
+        # Check source entity exists (logging only)
         self._check_source_entity()
 
         # Set up midnight reset for daily sensors
         if "daily" in self.entity_description.key:
             self._setup_midnight_reset()
 
-        # Register to track source sensor state changes
-        self.async_on_remove(
-            async_track_state_change_event(
-                self.hass,
-                [self._source_entity_id],
-                handle_state_change,
-                # Use the checked source_entity_id
-            )
-        )
+        # REMOVED: Event tracking and timer setup are no longer needed.
+        # The coordinator will now explicitly call async_update_integration.
 
-    @callback
-    def _integrate_on_state_change_callback(self, event) -> None:
-        """Handle sensor state change without max_sub_interval."""
-        old_state = event.data.get("old_state")
-        new_state = event.data.get("new_state")
-
-        self._integrate_on_state_change(old_state, new_state)
-
-    @callback
-    def _integrate_on_state_change_with_max_sub_interval(self, event) -> None:
-        old_state = event.data.get("old_state")
-        new_state = event.data.get("new_state")
-        self._cancel_max_sub_interval_exceeded_callback()
-
-        now = dt_util.utcnow()
-        # Compare coordinator update time and elapsed interval
-        coordinatorTime = self.coordinator.last_update_success or now
-        timeSinceLast = now - self._last_integration_time
-        if coordinatorTime == getattr(self, "_lastCoordinatorUpdate", None) \
-           and timeSinceLast < self._max_sub_interval:
-            _LOGGER.debug("Skipping integration: no new fetch, interval too short: %s", timeSinceLast)
-        else:
-            self._lastCoordinatorUpdate = coordinatorTime
-            try:
-                self._integrate_on_state_change(old_state, new_state)
-                self._last_integration_trigger = IntegrationTrigger.STATE_EVENT
-                self._last_integration_time = now
-                _LOGGER.debug(f"[_integrate_on_state_change_with_max_sub_interval] Setting _last_integration_time: {self._last_integration_time.time()}")
-            except Exception as ex:
-                _LOGGER.warning("Integration error: %s", ex)
-            finally:
-                self._schedule_max_sub_interval_exceeded_if_state_is_numeric(new_state)
-
-    def _integrate_on_state_change(
-        self, old_state: State | None, new_state: State | None
-    ) -> None:
-        """Perform integration based on state change."""
-        if new_state is None:
-            return
-
-        if old_state is None or old_state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
-            self.async_write_ha_state()
-            return
-
-        # Validate states
-        if not (states := self._validate_states(old_state.state, new_state.state)):
-            self.async_write_ha_state()
-            return
-
-        # Calculate elapsed time
-        elapsed_seconds = Decimal(
-            (new_state.last_reported - old_state.last_reported).total_seconds()
-            if self._last_integration_trigger == IntegrationTrigger.STATE_EVENT
-            else (new_state.last_reported - self._last_integration_time).total_seconds()
-        )
-
-        # Calculate area
-        area = self._calculate_trapezoidal(elapsed_seconds, *states)
-
-        # Update the integral
-        self._update_integral(area)
-        _LOGGER.debug("[on_state_change][%s] Updated state to: %s", self.entity_id, self._state)
-        self.async_write_ha_state()
-
-    def _schedule_max_sub_interval_exceeded_if_state_is_numeric(
-        self, source_state: State | None
-    ) -> None:
-        """Schedule integration based on max_sub_interval."""
-        if (
-            self._max_sub_interval is not None
-            and source_state is not None
-            and (source_state_dec := self._decimal_state(source_state.state))
-            is not None
-        ):
-
-            @callback
-            def _integrate_on_max_sub_interval_exceeded_callback(now: datetime) -> None:
-                """Integrate based on time and reschedule."""
-                # Check if a state change happened very recently to avoid double updates
-                time_since_last = now - self._last_integration_time
-                # Use timedelta for comparison
-                if self._last_integration_trigger == IntegrationTrigger.STATE_EVENT and time_since_last < timedelta(seconds=2):
-                    _LOGGER.debug(
-                        "[%s] Skipping time-based integration; state change occurred %s ago",
-                        self.entity_id,
-                        time_since_last,
-                    )
-                    # Only reschedule the next integration
-                    # Need the original source_state object here, which is captured by the closure
-                    source_state_obj = self.hass.states.get(self._source_entity_id)
-                    if source_state_obj: # Ensure state object exists before rescheduling
-                         self._schedule_max_sub_interval_exceeded_if_state_is_numeric(source_state_obj)
-                    return
-
-                elapsed_seconds = Decimal(
-                    (now - self._last_integration_time).total_seconds()
-                )
-
-                # Calculate area with constant state
-                area = self._calculate_area_with_one_state(
-                    elapsed_seconds, source_state_dec
-                )
-
-                # Update the integral
-                self._update_integral(area)
-                _LOGGER.debug("[schedule_max_sub_interval_exceeded][%s] Updated state to: %s", self.entity_id, self._state)
-                # Calculate seconds since last update
-                secondsSinceLastUpdate = (now - self._last_integration_time).total_seconds()
-                _LOGGER.debug(
-                    "[schedule_max_sub_interval_exceeded][%s] Max interval: %s, Seconds since last update: %.2f",
-                    self.entity_id,
-                    self._max_sub_interval,
-                    secondsSinceLastUpdate,
-                )
-                self.async_write_ha_state()
-
-                # Update tracking variables
-                self._last_integration_time = dt_util.utcnow()
-                self._last_integration_trigger = IntegrationTrigger.TIME_ELAPSED
-
-                # Schedule the next integration
-                self._schedule_max_sub_interval_exceeded_if_state_is_numeric(
-                    source_state
-                )
-
-            # Schedule the callback
-            self._max_sub_interval_exceeded_callback = async_call_later(
-                self.hass,
-                self._max_sub_interval,
-                _integrate_on_max_sub_interval_exceeded_callback,
-            )
+    # REMOVED: _integrate_on_state_change_callback, _integrate_on_state_change_with_max_sub_interval,
+    # _integrate_on_state_change, _schedule_max_sub_interval_exceeded_if_state_is_numeric
+    # These methods were part of the old event/timer-based integration logic.
 
     @property
     def native_value(self) -> Decimal | None:
@@ -675,9 +619,13 @@ class SigenergyIntegrationSensor(SigenergyEntity, RestoreSensor):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the state attributes of the sensor."""
-        return {
+        attrs = {
             "source_entity": self._source_entity_id,
+            "last_update_timestamp": self._last_update_timestamp.isoformat() if self._last_update_timestamp else None,
+            "last_source_value": str(self._last_source_value) if self._last_source_value is not None else None,
         }
+        # Add original attributes if needed, filtering out None values
+        return {k: v for k, v in attrs.items() if v is not None}
 
     def _check_source_entity(self) -> None:
         """Check if the source entity exists and log potential alternatives."""
