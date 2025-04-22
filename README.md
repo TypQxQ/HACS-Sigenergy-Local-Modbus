@@ -1,2 +1,7 @@
 # HACS-Sigenergy-Local-Modbus
-Old repository to point to the new one
+Name of project had to change for it to be considered into the standart HACS repository.
+
+New project name is without HACS in it. Found out just at final check when submiting for inclusion.
+Sorry for the inconvinience
+
+New project: https://github.com/TypQxQ/Sigenergy-Local-Modbus
